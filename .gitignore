@@ -1,0 +1,17 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Node / Next.js (we’ll add these later, but safe to ignore now)
+node_modules/
+.next/
+out/
+
+# Env files
+.env
+*.env
+.env.local
+web/.env*
+api/.env*
