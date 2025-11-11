@@ -1,20 +1,52 @@
-# Open CDS Mapping Toolkit — Repo Skeleton
+# Open CDS Mapping Toolkit — Dev Skeleton (Aligned)
 
-This is the **skeleton**. We’ll add the API and Web app in the next sub-steps.
+This repo follows the **MVP plan** in `docs/`:
 
-## Structure (after A4 completes)
+- Single **Next.js 14** app (TypeScript, Tailwind, TanStack Table) with **Route Handlers** for `/api/*` in the target deploy.
+- **Local dev (today):** separate FastAPI + Next.js just to get moving; we will converge to the single-app plan soon.
 
-- `web/` — Next.js (App Router) + TypeScript + Tailwind + TanStack Table.
-- `api/` — FastAPI (Python 3.11+), pandas, rapidfuzz.
-- `data/` — placeholder.
-- `docs/` — pointers to planning docs.
-- Root: `.gitignore`, `LICENSE`, `README.md`.
+**Key ideas from the docs**
 
-> No matcher logic yet; buttons and endpoints will be stubs.
+- Inputs: `ecc_extractors.csv` (required) + optional `s4_cds.csv` override; both include `fields_json` with field objects.
+- Matcher: heuristics-first (name/meta + **field-coverage**); optional LLM re-rank via Groq; bundled **CDS Registry** (mergeable by CSV delta).
+- Working mode: step-by-step, checklists, full-file outputs; keep artifacts separate from other threads (learnings only).
+- Repo hygiene: conventional commits; small PRs.
 
-## Local run (will work after A4.2/A4.3)
+See:
 
-- API at `http://localhost:8000`
-- Web at `http://localhost:3000`
+- `docs/PROJECT_OVERVIEW.md` (MVP inputs/outputs)
+- `docs/ARCHITECTURE_AND_HOSTING.md` (Next.js single-app plan)
+- `docs/TECH_STACK_AND_DECISIONS.md` (Route Handlers, registry, scoring)
+- `docs/ASSISTANT_WORKING_MODE.md` (process)
+- `docs/REPO_AND_GIT_PRACTICES.md` (commits/PRs)
 
-We’ll document exact commands once the API/Web scaffolds land.
+> Citations: PROJECT_OVERVIEW, TECH_STACK_AND_DECISIONS, ARCHITECTURE_AND_HOSTING, ASSISTANT_WORKING_MODE, REPO_AND_GIT_PRACTICES.
+
+---
+
+## Repo layout (current)
+
+web/ # Next.js app (App Router, Tailwind, TanStack Table)
+api/ # FastAPI stub (temporary for local dev)
+data/ # placeholder
+docs/ # planning docs
+
+### Status
+
+- API: `/health` works; `/match/` returns a placeholder (no matcher yet).
+- Web: Home page renders; **Upload (stub)** and **Placeholder Table** show.
+
+---
+
+## Run locally
+
+### 1) API (FastAPI, temporary for local dev)
+
+```powershell
+cd api
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+Copy-Item .env.example .env
+uvicorn app.main:app --reload --port 8000
+```
