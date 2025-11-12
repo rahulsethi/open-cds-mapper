@@ -1,66 +1,267 @@
 "use client";
 
-import { useState } from "react";
-import DataTable from "../components/DataTable";
+import React from "react";
+import DataTable from "@/components/DataTable";
+import { ColumnDef } from "@tanstack/react-table";
+import { postMatch } from "@/lib/api";
+import { MatchResponse, ResultRow } from "@/lib/types";
+import { downloadCsv, downloadJson } from "@/lib/download";
 
 export default function HomePage() {
-  const [eccFile, setEccFile] = useState<File | null>(null);
-  const [cdsFile, setCdsFile] = useState<File | null>(null);
+  const [ecc, setEcc] = React.useState<File | null>(null);
+  const [s4, setS4] = React.useState<File | null>(null);
+  const [useSamples, setUseSamples] = React.useState(false);
+  const [topK, setTopK] = React.useState(3);
+  const [loading, setLoading] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
+  const [resp, setResp] = React.useState<MatchResponse | null>(null);
+  const [rows, setRows] = React.useState<ResultRow[]>([]);
 
-  const disabled = true; // A4: keep disabled; logic comes later
+  const columns: ColumnDef<ResultRow>[] = [
+    { header: "Extractor", accessorKey: "extractor" },
+    { header: "CDS View", accessorKey: "cds_view" },
+    {
+      header: "Score",
+      accessorKey: "score",
+      cell: ({ getValue }) => (getValue<number>() ?? 0).toFixed(3),
+    },
+    {
+      header: "Name",
+      accessorKey: "name_score",
+      cell: ({ getValue }) => (getValue<number>() ?? 0).toFixed(3),
+    },
+    {
+      header: "Fields",
+      accessorKey: "field_overlap",
+      cell: ({ getValue }) => (getValue<number>() ?? 0).toFixed(3),
+    },
+    {
+      header: "Keys",
+      accessorKey: "key_overlap",
+      cell: ({ getValue }) => (getValue<number>() ?? 0).toFixed(3),
+    },
+  ];
+
+  function flatten(r: MatchResponse): ResultRow[] {
+    const out: ResultRow[] = [];
+    for (const m of r.matches) {
+      for (const c of m.candidates) {
+        out.push({
+          id: `${m.extractor_name}::${c.cds_view_name}`,
+          extractor: m.extractor_name,
+          extractor_text: m.extractor_text,
+          cds_view: c.cds_view_name,
+          cds_text: c.cds_view_text,
+          score: c.score,
+          name_score: c.name_score,
+          field_overlap: c.field_overlap,
+          key_overlap: c.key_overlap,
+          shared_fields: c.shared_fields,
+          shared_keys: c.shared_keys,
+        });
+      }
+    }
+    return out;
+  }
+
+  const canSubmit = useSamples || (!!ecc && !!s4);
+
+  async function onSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!canSubmit) return;
+    setLoading(true);
+    setError(null);
+    setResp(null);
+    setRows([]);
+
+    try {
+      const result = await postMatch(
+        useSamples ? {} : { ecc: ecc ?? undefined, s4: s4 ?? undefined },
+        topK
+      );
+      setResp(result);
+      setRows(flatten(result));
+    } catch (err: any) {
+      setError(err?.message ?? "Request failed");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  const onReset = () => {
+    setEcc(null);
+    setS4(null);
+    setResp(null);
+    setRows([]);
+    setError(null);
+  };
+
+  const onDownloadJson = () => {
+    if (!resp) return;
+    downloadJson("ocmt_match_result.json", resp);
+  };
+
+  const onExportCsv = () => {
+    if (!rows.length) return;
+    // Export only the most relevant columns, plus shared fields/keys
+    const toExport = rows.map((r) => ({
+      extractor: r.extractor,
+      cds_view: r.cds_view,
+      score: r.score,
+      name_score: r.name_score,
+      field_overlap: r.field_overlap,
+      key_overlap: r.key_overlap,
+      shared_fields: r.shared_fields ?? [],
+      shared_keys: r.shared_keys ?? [],
+    }));
+    downloadCsv("ocmt_matches.csv", toExport as any[]);
+  };
 
   return (
-    <div className="space-y-8">
-      <section className="rounded-2xl border p-5">
-        <h1 className="text-xl font-semibold">Upload CSVs (stub)</h1>
-        <p className="text-sm text-gray-600">
-          Provide two CSVs: ECC/BW extractors and S/4 CDS views. Submit is disabled in A4.
-        </p>
-        <form onSubmit={(e) => e.preventDefault()} className="mt-4 grid gap-3 sm:grid-cols-2">
-          <label className="block">
-            <span className="mb-1 block text-sm font-medium">ecc_extractors.csv</span>
-            <input
-              type="file"
-              accept=".csv"
-              onChange={(e) => setEccFile(e.target.files?.[0] ?? null)}
-              className="block w-full rounded-lg border p-2"
-            />
-          </label>
-          <label className="block">
-            <span className="mb-1 block text-sm font-medium">s4_cds.csv</span>
-            <input
-              type="file"
-              accept=".csv"
-              onChange={(e) => setCdsFile(e.target.files?.[0] ?? null)}
-              className="block w-full rounded-lg border p-2"
-            />
-          </label>
-          <div className="sm:col-span-2">
-            <button
-              type="submit"
-              disabled={disabled}
-              aria-disabled={disabled}
-              title="Coming soon"
-              className="rounded-lg bg-gray-300 px-4 py-2 font-medium text-gray-600 disabled:cursor-not-allowed"
-            >
-              Submit (disabled)
-            </button>
-            <div className="mt-2 text-xs text-gray-500">
-              Selected: {eccFile?.name ?? "none"} / {cdsFile?.name ?? "none"}
-            </div>
-          </div>
-        </form>
-      </section>
+    <main className="mx-auto max-w-5xl px-4 py-8">
+      <header className="mb-6 flex items-center justify-between">
+        <h1 className="text-xl font-semibold">OCMT</h1>
+        <p className="text-xs text-gray-500">Hosting plan: Vercel (UI)</p>
+      </header>
 
-      <section className="rounded-2xl border p-5">
-        <h2 className="text-lg font-semibold">Placeholder Table</h2>
-        <p className="text-sm text-gray-600">
-          This renders TanStack Table with sample columns and no data yet.
+      <form
+        onSubmit={onSubmit}
+        className="rounded-xl border border-gray-200 bg-white p-4"
+      >
+        <h2 className="text-lg font-semibold">Upload CSVs</h2>
+        <p className="mb-4 text-sm text-gray-600">
+          Provide two CSVs: ECC/BW extractors and S/4 CDS views. Or tick{" "}
+          <strong>Use server samples</strong>.
         </p>
-        <div className="mt-4">
-          <DataTable />
+
+        <div className="grid gap-4 md:grid-cols-2">
+          <div>
+            <label className="block text-sm font-medium text-gray-700">
+              ecc_extractors.csv
+            </label>
+            <input
+              type="file"
+              accept=".csv"
+              onChange={(e) => setEcc(e.target.files?.[0] ?? null)}
+              className="mt-1 block w-full rounded-lg border border-gray-300 p-2"
+              disabled={useSamples}
+            />
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700">
+              s4_cds.csv
+            </label>
+            <input
+              type="file"
+              accept=".csv"
+              onChange={(e) => setS4(e.target.files?.[0] ?? null)}
+              className="mt-1 block w-full rounded-lg border border-gray-300 p-2"
+              disabled={useSamples}
+            />
+          </div>
         </div>
+
+        <div className="mt-4 flex flex-wrap items-center gap-4">
+          <label className="flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={useSamples}
+              onChange={(e) => {
+                setUseSamples(e.target.checked);
+                if (e.target.checked) {
+                  setEcc(null);
+                  setS4(null);
+                }
+              }}
+            />
+            Use server sample CSVs
+          </label>
+
+          <label className="flex items-center gap-2 text-sm">
+            Top K:
+            <select
+              value={topK}
+              onChange={(e) => setTopK(Number(e.target.value))}
+              className="rounded-md border border-gray-300 p-1"
+            >
+              {[1, 2, 3, 4, 5].map((k) => (
+                <option key={k} value={k}>
+                  {k}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <button
+            type="submit"
+            disabled={!canSubmit || loading}
+            className={`rounded-md px-4 py-2 text-white ${
+              !canSubmit || loading
+                ? "bg-gray-400"
+                : "bg-black hover:bg-gray-800"
+            }`}
+          >
+            {loading ? "Processing..." : "Submit"}
+          </button>
+
+          <button
+            type="button"
+            onClick={onReset}
+            className="rounded-md border border-gray-300 px-3 py-2 text-sm"
+          >
+            Reset
+          </button>
+
+          <button
+            type="button"
+            onClick={onDownloadJson}
+            disabled={!resp}
+            className={`rounded-md px-3 py-2 text-sm text-white ${
+              resp ? "bg-indigo-600 hover:bg-indigo-700" : "bg-gray-400"
+            }`}
+          >
+            Download JSON
+          </button>
+
+          <button
+            type="button"
+            onClick={onExportCsv}
+            disabled={!rows.length}
+            className={`rounded-md px-3 py-2 text-sm text-white ${
+              rows.length ? "bg-teal-600 hover:bg-teal-700" : "bg-gray-400"
+            }`}
+          >
+            Export CSV
+          </button>
+
+          <div className="text-xs text-gray-500">
+            Selected: {ecc?.name ?? "none"} / {s4?.name ?? "none"}
+          </div>
+        </div>
+
+        {error ? (
+          <div className="mt-3 rounded-md bg-red-50 p-2 text-sm text-red-700">
+            {error}
+          </div>
+        ) : null}
+      </form>
+
+      <section className="mt-6">
+        <h2 className="mb-1 text-lg font-semibold">Results</h2>
+        <p className="mb-3 text-sm text-gray-600">
+          {resp
+            ? `Extractors: ${resp.counts.extractors} · CDS Views: ${resp.counts.cds_views} · Method: ${resp.run_info.method}`
+            : "No results yet."}
+        </p>
+
+        <DataTable<ResultRow>
+          columns={columns}
+          data={rows}
+          caption="Click column headers to sort."
+          emptyMessage="Run a match to see results."
+        />
       </section>
-    </div>
+    </main>
   );
 }
