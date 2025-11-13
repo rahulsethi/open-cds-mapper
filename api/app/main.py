@@ -23,9 +23,41 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+DEFAULT_WEIGHTS = {"name": 0.6, "fields": 0.3, "keys": 0.1}
+
+
+def normalize_weights(w_name, w_fields, w_keys):
+    """
+    Turn raw floats (possibly None) into a valid weights dict that sums to 1.0.
+    - If all None -> defaults.
+    - Negative numbers -> 400.
+    - If sum <= 0 after filtering -> defaults.
+    """
+    raw = {"name": w_name, "fields": w_fields, "keys": w_keys}
+
+    # validate negatives
+    for k, v in raw.items():
+        if v is not None and v < 0:
+            raise HTTPException(status_code=400, detail=f"weight '{k}' must be >= 0")
+
+    # if all None -> defaults
+    if all(v is None for v in raw.values()):
+        return DEFAULT_WEIGHTS.copy()
+
+    # replace None with 0, then normalize
+    x_name = raw["name"] or 0.0
+    x_fields = raw["fields"] or 0.0
+    x_keys = raw["keys"] or 0.0
+    s = x_name + x_fields + x_keys
+    if s <= 0:
+        return DEFAULT_WEIGHTS.copy()
+    return {"name": x_name / s, "fields": x_fields / s, "keys": x_keys / s}
+
+
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
 
 @app.post("/match/")
 async def match(
