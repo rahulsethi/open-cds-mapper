@@ -4,7 +4,7 @@ import React from "react";
 import DataTable from "@/components/DataTable";
 import { ColumnDef } from "@tanstack/react-table";
 import { postMatch } from "@/lib/api";
-import { MatchResponse, ResultRow } from "@/lib/types";
+import { MatchResponse, ResultRow, Explain } from "@/lib/types";
 import { downloadCsv, downloadJson } from "@/lib/download";
 
 export default function HomePage() {
@@ -22,6 +22,7 @@ export default function HomePage() {
   const [error, setError] = React.useState<string | null>(null);
   const [resp, setResp] = React.useState<MatchResponse | null>(null);
   const [rows, setRows] = React.useState<ResultRow[]>([]);
+  const [explainFor, setExplainFor] = React.useState<ResultRow | null>(null);
 
   const columns: ColumnDef<ResultRow>[] = [
     { header: "Extractor", accessorKey: "extractor" },
@@ -46,6 +47,18 @@ export default function HomePage() {
       accessorKey: "key_overlap",
       cell: ({ getValue }) => (getValue<number>() ?? 0).toFixed(3),
     },
+    {
+      header: "Explain",
+      id: "explain",
+      cell: ({ row }) => (
+        <button
+          className="rounded-md border px-2 py-1 text-xs hover:bg-gray-50"
+          onClick={() => setExplainFor(row.original)}
+        >
+          Details
+        </button>
+      ),
+    },
   ];
 
   function flatten(r: MatchResponse): ResultRow[] {
@@ -64,6 +77,7 @@ export default function HomePage() {
           key_overlap: c.key_overlap,
           shared_fields: c.shared_fields,
           shared_keys: c.shared_keys,
+          explain: c.explain,
         });
       }
     }
@@ -79,6 +93,7 @@ export default function HomePage() {
     setError(null);
     setResp(null);
     setRows([]);
+    setExplainFor(null);
 
     try {
       const result = await postMatch(
@@ -101,6 +116,7 @@ export default function HomePage() {
     setResp(null);
     setRows([]);
     setError(null);
+    setExplainFor(null);
   };
 
   const onDownloadJson = () => {
@@ -233,7 +249,7 @@ export default function HomePage() {
             Use server sample CSVs
           </label>
 
-        <label className="flex items-center gap-2 text-sm">
+          <label className="flex items-center gap-2 text-sm">
             Top K:
             <select
               value={topK}
@@ -317,6 +333,103 @@ export default function HomePage() {
           emptyMessage="Run a match to see results."
         />
       </section>
+
+      {/* A10: simple modal for explanation */}
+      {explainFor ? (
+        <ExplainModal row={explainFor} onClose={() => setExplainFor(null)} />
+      ) : null}
     </main>
+  );
+}
+
+function ExplainModal({ row, onClose }: { row: ResultRow; onClose: () => void }) {
+  const ex: Explain | undefined = row.explain;
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+      <div className="max-h-[85vh] w-full max-w-2xl overflow-auto rounded-xl bg-white p-5 shadow-2xl">
+        <div className="mb-2 flex items-start justify-between">
+          <h3 className="text-lg font-semibold">
+            Why this match? <span className="text-sm text-gray-500">({row.extractor} → {row.cds_view})</span>
+          </h3>
+          <button
+            onClick={onClose}
+            className="rounded-md border px-3 py-1 text-sm hover:bg-gray-50"
+          >
+            Close
+          </button>
+        </div>
+
+        {!ex ? (
+          <div className="text-sm text-gray-600">No explanation available.</div>
+        ) : (
+          <div className="space-y-4 text-sm">
+            <div className="rounded-lg border p-3">
+              <div className="font-medium">Score breakdown</div>
+              <div className="mt-1 grid grid-cols-2 gap-2">
+                <div>
+                  <div>Weights: name {ex.weights.name.toFixed(2)}, fields {ex.weights.fields.toFixed(2)}, keys {ex.weights.keys.toFixed(2)}</div>
+                  <div>
+                    Parts: name {ex.score_parts.name.toFixed(3)}, fields {ex.score_parts.fields.toFixed(3)}, keys {ex.score_parts.keys.toFixed(3)}
+                  </div>
+                </div>
+                <div>
+                  <div>Overall score: <span className="font-semibold">{row.score.toFixed(3)}</span></div>
+                  <div>Name similarity: {row.name_score.toFixed(3)}</div>
+                  <div>Field overlap: {row.field_overlap.toFixed(3)}</div>
+                  <div>Key overlap: {row.key_overlap.toFixed(3)}</div>
+                </div>
+              </div>
+            </div>
+
+            <div className="rounded-lg border p-3">
+              <div className="font-medium">Matched name terms</div>
+              <div className="mt-1">
+                {ex.name_terms.length ? (
+                  <div className="flex flex-wrap gap-2">
+                    {ex.name_terms.map((t) => (
+                      <span key={t} className="rounded bg-gray-100 px-2 py-0.5 text-xs">
+                        {t}
+                      </span>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="text-gray-600">No obvious token overlap.</div>
+                )}
+              </div>
+            </div>
+
+            <div className="rounded-lg border p-3">
+              <div className="font-medium">Field overlap</div>
+              <div className="mt-1 text-gray-700">
+                Shared ({ex.field_overlap.shared.length}) of extractor {ex.field_overlap.extractor_total} vs CDS {ex.field_overlap.cds_total}
+              </div>
+              <div className="mt-2 flex flex-wrap gap-2">
+                {ex.field_overlap.shared.map((f) => (
+                  <span key={f} className="rounded bg-gray-100 px-2 py-0.5 text-xs">
+                    {f}
+                  </span>
+                ))}
+                {!ex.field_overlap.shared.length && <span className="text-xs text-gray-500">None</span>}
+              </div>
+            </div>
+
+            <div className="rounded-lg border p-3">
+              <div className="font-medium">Key overlap</div>
+              <div className="mt-1 text-gray-700">
+                Shared ({ex.key_overlap.shared.length}) of extractor {ex.key_overlap.extractor_total} vs CDS {ex.key_overlap.cds_total}
+              </div>
+              <div className="mt-2 flex flex-wrap gap-2">
+                {ex.key_overlap.shared.map((k) => (
+                  <span key={k} className="rounded bg-gray-100 px-2 py-0.5 text-xs">
+                    {k}
+                  </span>
+                ))}
+                {!ex.key_overlap.shared.length && <span className="text-xs text-gray-500">None</span>}
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
   );
 }
