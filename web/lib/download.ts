@@ -1,46 +1,66 @@
-export function downloadJson(filename: string, data: unknown) {
-  const blob = new Blob([JSON.stringify(data, null, 2)], {
-    type: "application/json",
-  });
+// web/lib/download.ts
+
+/** Trigger a browser download from a Blob. */
+function saveBlob(blob: Blob, filename: string) {
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = filename.endsWith(".json") ? filename : `${filename}.json`;
+  a.download = filename;
   document.body.appendChild(a);
   a.click();
   a.remove();
   URL.revokeObjectURL(url);
 }
 
-export function downloadCsv(filename: string, rows: Record<string, unknown>[]) {
-  if (!rows.length) return;
+/** Download any JS value as pretty-printed JSON. */
+export function downloadJSON(data: unknown, filename = "ocmt_match_result.json") {
+  const text = JSON.stringify(data, null, 2);
+  const blob = new Blob([text], { type: "application/json" });
+  saveBlob(blob, filename);
+}
 
-  // Collect all keys that appear in any row (stable order)
-  const headerKeys = Array.from(
-    rows.reduce((set, r) => {
-      Object.keys(r).forEach((k) => set.add(k));
-      return set;
-    }, new Set<string>())
-  );
+/** Back-compat alias (some older snippets used camelCase). */
+export const downloadJson = downloadJSON;
 
-  const esc = (v: unknown) => {
-    if (v == null) return "";
-    const s =
-      Array.isArray(v) ? v.join(";") : typeof v === "object" ? JSON.stringify(v) : String(v);
-    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+/**
+ * Export rows to CSV.
+ * - Drops fields whose key starts with "_" (e.g. internal helpers like "_raw").
+ * - Infers headers from the first row.
+ */
+export function exportCSV<T extends Record<string, any>>(
+  rows: T[],
+  filename = "ocmt_matches.csv"
+) {
+  if (!rows || rows.length === 0) return;
+
+  const cleaned = rows.map((r) => {
+    const o: Record<string, any> = {};
+    for (const k of Object.keys(r)) {
+      if (!k.startsWith("_")) o[k] = (r as any)[k];
+    }
+    return o;
+  });
+
+  const headers = Object.keys(cleaned[0]);
+
+  const escape = (val: any) => {
+    if (val === null || val === undefined) return "";
+    const s = String(val);
+    // Quote if contains comma, quote, or newline
+    if (/[",\n\r]/.test(s)) {
+      return `"${s.replace(/"/g, '""')}"`;
+    }
+    return s;
   };
 
-  const header = headerKeys.join(",");
-  const lines = rows.map((r) => headerKeys.map((k) => esc((r as any)[k])).join(","));
-  const csv = [header, ...lines].join("\n");
+  const lines = [
+    headers.join(","),
+    ...cleaned.map((row) => headers.map((h) => escape(row[h])).join(",")),
+  ].join("\r\n");
 
-  const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename.endsWith(".csv") ? filename : `${filename}.csv`;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  URL.revokeObjectURL(url);
+  const blob = new Blob([lines], { type: "text/csv;charset=utf-8" });
+  saveBlob(blob, filename);
 }
+
+/** Back-compat alias (older code imported exportCsv). */
+export const exportCsv = exportCSV;

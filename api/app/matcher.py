@@ -1,4 +1,6 @@
-import io
+# api/app/matcher.py
+from __future__ import annotations
+
 import json
 import re
 from typing import Dict, List, Tuple, Any
@@ -143,8 +145,8 @@ def score_candidates(
 
     return {
         "run_info": {
-            "top_k": top_k,
-            "weights": weights,
+            "top_k": max(top_k, 1),
+            "weights": {"name": round(w_name, 4), "fields": round(w_fields, 4), "keys": round(w_keys, 4)},
             "method": "heuristics-only (rapidfuzz + jaccard); no LLM",
         },
         "counts": {"extractors": len(ecc_df), "cds_views": len(cds_df)},
