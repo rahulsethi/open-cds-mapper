@@ -1,12 +1,26 @@
+// web/lib/api.ts
 import { MatchResponse } from "./types";
 
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
+// For browser-side fetches, env must be prefixed with NEXT_PUBLIC_*
+const API_BASE =
+  process.env.NEXT_PUBLIC_API_BASE_URL || "http://127.0.0.1:8000";
 
-export async function postMatch(
-  files: { ecc?: File; s4?: File },
-  topK: number,
-  weights?: { name: number; fields: number; keys: number }
-): Promise<MatchResponse> {
+type Weights = { name: number; fields: number; keys: number };
+
+type PostArgs = {
+  files: { ecc?: File | null; s4?: File | null };
+  topK: number;
+  weights?: Weights;
+  useSamples: boolean;
+};
+
+export async function postMatch({
+  files,
+  topK,
+  weights,
+  useSamples,
+}: PostArgs): Promise<MatchResponse> {
+  // --- build query params (FastAPI expects top_k and weights in query) ---
   const params = new URLSearchParams();
   params.set("top_k", String(topK));
   if (weights) {
@@ -16,24 +30,26 @@ export async function postMatch(
   }
 
   const url = `${API_BASE}/match/?${params.toString()}`;
-  const hasFiles = files.ecc || files.s4;
 
-  const opts: RequestInit = { method: "POST" };
+  // --- build body (FastAPI expects multipart form) ---
+  const hasFiles = Boolean(files.ecc || files.s4);
+  const form = new FormData();
+
   if (hasFiles) {
-    const form = new FormData();
     if (files.ecc) form.append("ecc_csv", files.ecc);
     if (files.s4) form.append("s4_csv", files.s4);
-    opts.body = form;
+    // we can include use_samples=false but it defaults to false on server
+  } else if (useSamples) {
+    // IMPORTANT: server reads this from the *form*, not the query
+    form.append("use_samples", "true");
+  } else {
+    throw new Error("Provide both CSVs or tick ‘Use server sample CSVs’."); // client-side guard
   }
 
-  const res = await fetch(url, opts);
+  const res = await fetch(url, { method: "POST", body: form });
   if (!res.ok) {
-    let detail = await res.text();
-    try {
-      const j = JSON.parse(detail);
-      detail = (j as any).detail || detail;
-    } catch {}
-    throw new Error(detail || `Request failed with ${res.status}`);
+    const text = await res.text().catch(() => "");
+    throw new Error(text || res.statusText);
   }
-  return (await res.json()) as MatchResponse;
+  return res.json();
 }
