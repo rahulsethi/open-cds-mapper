@@ -8,7 +8,7 @@ from .matcher import load_ecc_df, load_cds_df, score_candidates
 
 load_dotenv()
 
-app = FastAPI(title="OCMT API", version="0.3.0")
+app = FastAPI(title="OCMT API", version="0.4.0")
 
 allow_origins = os.getenv("ALLOW_ORIGINS", "http://localhost:3000")
 origins = [o.strip() for o in allow_origins.split(",") if o.strip()]
@@ -22,6 +22,7 @@ app.add_middleware(
 )
 
 DEFAULT_WEIGHTS = {"name": 0.6, "fields": 0.3, "keys": 0.1}
+
 
 def normalize_weights(w_name, w_fields, w_keys):
     raw = {"name": w_name, "fields": w_fields, "keys": w_keys}
@@ -38,9 +39,11 @@ def normalize_weights(w_name, w_fields, w_keys):
         return DEFAULT_WEIGHTS.copy()
     return {"name": x_name / s, "fields": x_fields / s, "keys": x_keys / s}
 
+
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
 
 @app.post("/match/")
 async def match(
