@@ -9,7 +9,7 @@ from .matcher import load_ecc_df, load_cds_df, score_candidates
 # Load .env (dev convenience)
 load_dotenv()
 
-app = FastAPI(title="OCMT API", version="0.3.0")
+app = FastAPI(title="OCMT API", version="0.2.0")
 
 # CORS: read comma-separated origins from ALLOW_ORIGINS or default to localhost:3000
 allow_origins = os.getenv("ALLOW_ORIGINS", "http://localhost:3000")
@@ -64,17 +64,13 @@ async def match(
     ecc_csv: UploadFile = File(None, description="ECC/BW extractors CSV"),
     s4_csv: UploadFile = File(None, description="S/4 CDS CSV"),
     top_k: int = Query(3, ge=1, le=10),
-    w_name: float | None = Query(None, description="Weight for name similarity"),
-    w_fields: float | None = Query(None, description="Weight for field overlap"),
-    w_keys: float | None = Query(None, description="Weight for key overlap"),
 ):
     """
-    Baseline matcher with tunable weights (A9). If no files are uploaded, falls
-    back to repo samples under /data for local dev.
+    Baseline matcher (A6): heuristics-only.
+    - If files are not provided, we fall back to /data/*.sample.csv for local dev convenience.
+    - Output: for each extractor, top_k CDS candidates with component scores.
     """
     try:
-        weights = normalize_weights(w_name, w_fields, w_keys)
-
         if ecc_csv and s4_csv:
             ecc_bytes = io.BytesIO(await ecc_csv.read())
             s4_bytes = io.BytesIO(await s4_csv.read())
@@ -91,9 +87,10 @@ async def match(
         ecc_df = load_ecc_df(ecc_bytes)
         cds_df = load_cds_df(s4_bytes)
 
-        result = score_candidates(ecc_df, cds_df, top_k=top_k, weights=weights)
+        result = score_candidates(ecc_df, cds_df, top_k=top_k)
         return result
     except HTTPException:
         raise
     except Exception as e:
+        # Keep errors readable in A6; later we can add structured error codes.
         raise HTTPException(status_code=500, detail=f"match failed: {repr(e)}")
