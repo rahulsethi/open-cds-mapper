@@ -12,6 +12,12 @@ export default function HomePage() {
   const [s4, setS4] = React.useState<File | null>(null);
   const [useSamples, setUseSamples] = React.useState(false);
   const [topK, setTopK] = React.useState(3);
+
+  // A9: weights
+  const [wName, setWName] = React.useState(0.6);
+  const [wFields, setWFields] = React.useState(0.3);
+  const [wKeys, setWKeys] = React.useState(0.1);
+
   const [loading, setLoading] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
   const [resp, setResp] = React.useState<MatchResponse | null>(null);
@@ -77,7 +83,8 @@ export default function HomePage() {
     try {
       const result = await postMatch(
         useSamples ? {} : { ecc: ecc ?? undefined, s4: s4 ?? undefined },
-        topK
+        topK,
+        { name: wName, fields: wFields, keys: wKeys }
       );
       setResp(result);
       setRows(flatten(result));
@@ -103,7 +110,6 @@ export default function HomePage() {
 
   const onExportCsv = () => {
     if (!rows.length) return;
-    // Export only the most relevant columns, plus shared fields/keys
     const toExport = rows.map((r) => ({
       extractor: r.extractor,
       cds_view: r.cds_view,
@@ -116,6 +122,8 @@ export default function HomePage() {
     }));
     downloadCsv("ocmt_matches.csv", toExport as any[]);
   };
+
+  const sum = wName + wFields + wKeys;
 
   return (
     <main className="mx-auto max-w-5xl px-4 py-8">
@@ -162,6 +170,53 @@ export default function HomePage() {
           </div>
         </div>
 
+        {/* A9: Weights */}
+        <div className="mt-6 rounded-lg border border-gray-200 p-3">
+          <div className="mb-2 text-sm font-medium">Weights</div>
+          <div className="grid gap-4 md:grid-cols-3">
+            <label className="text-sm">
+              <div className="mb-1">Name ({wName.toFixed(2)})</div>
+              <input
+                type="range"
+                min={0}
+                max={1}
+                step={0.05}
+                value={wName}
+                onChange={(e) => setWName(Number(e.target.value))}
+                className="w-full"
+              />
+            </label>
+            <label className="text-sm">
+              <div className="mb-1">Fields ({wFields.toFixed(2)})</div>
+              <input
+                type="range"
+                min={0}
+                max={1}
+                step={0.05}
+                value={wFields}
+                onChange={(e) => setWFields(Number(e.target.value))}
+                className="w-full"
+              />
+            </label>
+            <label className="text-sm">
+              <div className="mb-1">Keys ({wKeys.toFixed(2)})</div>
+              <input
+                type="range"
+                min={0}
+                max={1}
+                step={0.05}
+                value={wKeys}
+                onChange={(e) => setWKeys(Number(e.target.value))}
+                className="w-full"
+              />
+            </label>
+          </div>
+          <p className="mt-2 text-xs text-gray-600">
+            Sum: <span className={sum > 0 ? "text-green-600" : "text-red-600"}>{sum.toFixed(2)}</span>{" "}
+            (API normalizes these so the final weights sum to 1.0.)
+          </p>
+        </div>
+
         <div className="mt-4 flex flex-wrap items-center gap-4">
           <label className="flex items-center gap-2 text-sm">
             <input
@@ -178,7 +233,7 @@ export default function HomePage() {
             Use server sample CSVs
           </label>
 
-          <label className="flex items-center gap-2 text-sm">
+        <label className="flex items-center gap-2 text-sm">
             Top K:
             <select
               value={topK}
