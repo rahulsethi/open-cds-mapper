@@ -16,8 +16,7 @@ from .matcher import run_match
 # Load .env (optional)
 load_dotenv()
 
-ALLOW_ORIGINS = os.getenv("ALLOW_ORIGINS", "http://localhost:3000")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")  # placeholder for later
+app = FastAPI(title="OCMT API", version="0.4.0")
 
 app = FastAPI(title="OCMT API", version="0.1.0")
 
@@ -29,69 +28,29 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+DEFAULT_WEIGHTS = {"name": 0.6, "fields": 0.3, "keys": 0.1}
+
+
+def normalize_weights(w_name, w_fields, w_keys):
+    raw = {"name": w_name, "fields": w_fields, "keys": w_keys}
+    for k, v in raw.items():
+        if v is not None and v < 0:
+            raise HTTPException(status_code=400, detail=f"weight '{k}' must be >= 0")
+    if all(v is None for v in raw.values()):
+        return DEFAULT_WEIGHTS.copy()
+    x_name = raw["name"] or 0.0
+    x_fields = raw["fields"] or 0.0
+    x_keys = raw["keys"] or 0.0
+    s = x_name + x_fields + x_keys
+    if s <= 0:
+        return DEFAULT_WEIGHTS.copy()
+    return {"name": x_name / s, "fields": x_fields / s, "keys": x_keys / s}
+
 
 @app.get("/health")
 def health() -> Dict[str, str]:
     return {"status": "ok"}
 
-
-# ---------- Helpers ----------
-
-ROOT = Path(__file__).resolve().parents[2]  # project root
-DATA_DIR = ROOT / "data"
-
-
-def _load_csv_upload(upload: UploadFile) -> pd.DataFrame:
-    data = upload.file.read()
-    return pd.read_csv(
-        io.BytesIO(data),
-        dtype=str,
-        keep_default_na=False,
-        na_filter=False,
-        engine="python",
-    )
-
-
-def _load_sample_csvs() -> tuple[pd.DataFrame, pd.DataFrame]:
-    ecc = pd.read_csv(
-        DATA_DIR / "ecc_extractors.sample.csv",
-        dtype=str,
-        keep_default_na=False,
-        na_filter=False,
-        engine="python",
-    )
-    s4 = pd.read_csv(
-        DATA_DIR / "s4_cds.sample.csv",
-        dtype=str,
-        keep_default_na=False,
-        na_filter=False,
-        engine="python",
-    )
-    return ecc, s4
-
-
-def _read_weights(
-    name_weight: Optional[float],
-    fields_weight: Optional[float],
-    keys_weight: Optional[float],
-) -> Dict[str, float]:
-    # Default weights
-    w = {
-        "name": 0.6,
-        "fields": 0.3,
-        "keys": 0.1,
-    }
-    if name_weight is not None:
-        w["name"] = float(name_weight)
-    if fields_weight is not None:
-        w["fields"] = float(fields_weight)
-    if keys_weight is not None:
-        w["keys"] = float(keys_weight)
-    # Normalize inside matcher too, but we keep this reasonable
-    return w
-
-
-# ---------- Routes ----------
 
 @app.post("/match/")
 async def match_route(
