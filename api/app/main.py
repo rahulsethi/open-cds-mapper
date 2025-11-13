@@ -2,28 +2,86 @@
 from __future__ import annotations
 
 import io
-import os
 from pathlib import Path
 from typing import Optional, Dict, Any
 
 import pandas as pd
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from dotenv import load_dotenv
 
-from .matcher import run_match
+from .matcher import run_match  # existing matcher from A6/A10
 
-# Load .env (optional)
-load_dotenv()
 
-ALLOW_ORIGINS = os.getenv("ALLOW_ORIGINS", "http://localhost:3000")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")  # placeholder for later
+# ---------- helpers ----------
+
+def _repo_root() -> Path:
+    # .../repo/api/app/main.py -> parents[2] = repo root
+    return Path(__file__).resolve().parents[2]
+
+def _api_dir() -> Path:
+    # .../repo/api
+    return Path(__file__).resolve().parents[1]
+
+def _find_sample(name: str) -> Path:
+    """
+    Look for sample CSVs in common places:
+      - <repo>/data/<name>
+      - <repo>/api/data/<name>
+      - CWD/data/<name>  (fallback for odd run contexts)
+    """
+    candidates = [
+        _repo_root() / "data" / name,
+        _api_dir() / "data" / name,
+        Path.cwd() / "data" / name,
+    ]
+    for p in candidates:
+        if p.exists():
+            return p
+    tried = " | ".join(str(p) for p in candidates)
+    raise FileNotFoundError(f"Could not locate sample file '{name}'. Tried: {tried}")
+
+def _read_upload_csv(file: UploadFile) -> pd.DataFrame:
+    """
+    Read an uploaded CSV (multipart/form-data) into a pandas DataFrame.
+    Uses bytes buffer; avoids temp files and platform quirks.
+    """
+    if file is None:
+        raise HTTPException(status_code=400, detail="Missing file upload.")
+    # UploadFile.read() is async; but FastAPI calls this endpoint in a threadpool
+    # so it's fine to use file.file.read() here to avoid 'await' in a sync def.
+    raw: bytes = file.file.read()
+    if not raw:
+        raise HTTPException(status_code=400, detail=f"Empty upload for '{file.filename}'.")
+    try:
+        return pd.read_csv(io.BytesIO(raw))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Failed to parse '{file.filename}': {e}")
+
+def _read_sample_csv(name: str) -> pd.DataFrame:
+    path = _find_sample(name)
+    try:
+        return pd.read_csv(path)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to read sample '{path}': {e}")
+
+def _normalize_weights(w: Dict[str, float]) -> Dict[str, float]:
+    # Defensive normalization (server-side truth)
+    name = float(w.get("name", 0.6))
+    fields = float(w.get("fields", 0.3))
+    keys = float(w.get("keys", 0.1))
+    s = name + fields + keys
+    if s <= 0:
+        return {"name": 0.6, "fields": 0.3, "keys": 0.1}
+    return {"name": name / s, "fields": fields / s, "keys": keys / s}
+
+
+# ---------- app ----------
 
 app = FastAPI(title="OCMT API", version="0.1.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[o.strip() for o in ALLOW_ORIGINS.split(",") if o.strip()],
+    allow_origins=["*"],  # dev-friendly; lock down for prod
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -31,103 +89,49 @@ app.add_middleware(
 
 
 @app.get("/health")
-def health() -> Dict[str, str]:
+def health():
     return {"status": "ok"}
 
 
-# ---------- Helpers ----------
-
-ROOT = Path(__file__).resolve().parents[2]  # project root
-DATA_DIR = ROOT / "data"
-
-
-def _load_csv_upload(upload: UploadFile) -> pd.DataFrame:
-    data = upload.file.read()
-    return pd.read_csv(
-        io.BytesIO(data),
-        dtype=str,
-        keep_default_na=False,
-        na_filter=False,
-        engine="python",
-    )
-
-
-def _load_sample_csvs() -> tuple[pd.DataFrame, pd.DataFrame]:
-    ecc = pd.read_csv(
-        DATA_DIR / "ecc_extractors.sample.csv",
-        dtype=str,
-        keep_default_na=False,
-        na_filter=False,
-        engine="python",
-    )
-    s4 = pd.read_csv(
-        DATA_DIR / "s4_cds.sample.csv",
-        dtype=str,
-        keep_default_na=False,
-        na_filter=False,
-        engine="python",
-    )
-    return ecc, s4
-
-
-def _read_weights(
-    name_weight: Optional[float],
-    fields_weight: Optional[float],
-    keys_weight: Optional[float],
-) -> Dict[str, float]:
-    # Default weights
-    w = {
-        "name": 0.6,
-        "fields": 0.3,
-        "keys": 0.1,
-    }
-    if name_weight is not None:
-        w["name"] = float(name_weight)
-    if fields_weight is not None:
-        w["fields"] = float(fields_weight)
-    if keys_weight is not None:
-        w["keys"] = float(keys_weight)
-    # Normalize inside matcher too, but we keep this reasonable
-    return w
-
-
-# ---------- Routes ----------
-
 @app.post("/match/")
-async def match_route(
-    # Either upload two CSVs…
-    ecc_csv: Optional[UploadFile] = File(default=None),
-    s4_csv: Optional[UploadFile] = File(default=None),
-    # …or tick the sample switch
-    use_samples: bool = Form(default=False),
-    # knobs
-    top_k: int = Form(default=3),
-    name_weight: Optional[float] = Form(default=None),
-    fields_weight: Optional[float] = Form(default=None),
-    keys_weight: Optional[float] = Form(default=None),
+def match(
+    # uploads (optional when use_samples=true)
+    ecc_csv: Optional[UploadFile] = File(None),
+    s4_csv: Optional[UploadFile] = File(None),
+
+    # params
+    top_k: int = Form(3),
+    use_samples: bool = Form(False),
+
+    # weight sliders (optional; server normalizes anyway)
+    w_name: Optional[float] = Form(None),
+    w_fields: Optional[float] = Form(None),
+    w_keys: Optional[float] = Form(None),
 ):
-    """
-    Accepts either (a) two CSV uploads or (b) use_samples=true to load bundled demos.
-    Weights are optional — default to 0.6/0.3/0.1 and normalized server-side.
-    """
-    # Load dataframes
+    # Resolve inputs
     if use_samples:
-        ecc_df, s4_df = _load_sample_csvs()
+        ecc_df = _read_sample_csv("ecc_extractors.sample.csv")
+        s4_df  = _read_sample_csv("s4_cds.sample.csv")
     else:
         if not ecc_csv or not s4_csv:
-            raise HTTPException(status_code=400, detail="Provide both CSVs or set use_samples=true.")
-        ecc_df = _load_csv_upload(ecc_csv)
-        s4_df = _load_csv_upload(s4_csv)
+            raise HTTPException(
+                status_code=400,
+                detail="Provide both CSVs or set use_samples=true."
+            )
+        ecc_df = _read_upload_csv(ecc_csv)
+        s4_df  = _read_upload_csv(s4_csv)
 
-    weights = _read_weights(name_weight, fields_weight, keys_weight)
+    # Normalize weights
+    weights = _normalize_weights({
+        "name": w_name if w_name is not None else 0.6,
+        "fields": w_fields if w_fields is not None else 0.3,
+        "keys": w_keys if w_keys is not None else 0.1,
+    })
 
-    # Ensure expected columns exist (harmless if already present)
-    for col in ["extractor_name", "extractor_text", "fields_json", "primary_keys_json"]:
-        if col not in ecc_df.columns:
-            ecc_df[col] = ""
-    for col in ["cds_view_name", "cds_view_text", "fields_json", "primary_keys_json"]:
-        if col not in s4_df.columns:
-            s4_df[col] = ""
+    # Run baseline matcher (returns JSON-serializable dict)
+    try:
+        result = run_match(ecc_df=ecc_df, s4_df=s4_df, top_k=top_k, weights=weights)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Matcher failed: {e}")
 
-    result = run_match(ecc_df, s4_df, top_k=top_k, weights=weights)
     return result

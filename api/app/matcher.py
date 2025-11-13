@@ -1,249 +1,211 @@
-# api/app/matcher.py
 from __future__ import annotations
 
 import json
 import math
 import re
-from dataclasses import dataclass
-from typing import Iterable, List, Set, Tuple, Dict, Any, Optional
+from typing import Any, Dict, List, Set, Tuple
 
 import pandas as pd
 from rapidfuzz import fuzz
 
 
-# ---------- Data shapes ----------
+STOPWORDS = {
+    "the",
+    "a",
+    "an",
+    "of",
+    "for",
+    "and",
+    "to",
+    "by",
+    "on",
+    "in",
+    "data",
+    "table",
+    "item",
+    "document",
+    "doc",
+    "gl",
+    "fi",
+    "sd",
+    "bf",
+    "bil",
+    "bf",
+    "is",
+    "bf",
+}
 
-@dataclass
-class Record:
-    """Normalized record used by the matcher."""
-    name: str
-    text: str
-    fields: Set[str]       # canonical field names, upper-cased
-    keys: Set[str]         # canonical primary key names, upper-cased
+
+def _norm_token(t: str) -> str:
+    t = re.sub(r"[^A-Za-z0-9]+", " ", t or "").strip().upper()
+    return t
 
 
-# ---------- Utilities ----------
-
-_token_re = re.compile(r"[A-Za-z0-9]+")
-
-
-def _tokenize(s: str) -> List[str]:
-    return [t.upper() for t in _token_re.findall(s or "")]
+def _tokenize(text: str) -> Set[str]:
+    base = _norm_token(text)
+    tokens = {tok for tok in base.split() if len(tok) >= 3 and tok.lower() not in STOPWORDS}
+    return tokens
 
 
-def _name_similarity(a: str, b: str) -> float:
-    """0..1 using rapidfuzz token_set_ratio."""
-    if not a or not b:
-        return 0.0
-    return fuzz.token_set_ratio(a, b) / 100.0
+def _parse_json_array(cell: Any) -> List[dict]:
+    """
+    Safely parse a cell that should contain JSON array text.
+    Returns [] on failure.
+    """
+    if cell is None or (isinstance(cell, float) and math.isnan(cell)):
+        return []
+    if isinstance(cell, list):
+        return cell
+    try:
+        return json.loads(str(cell))
+    except Exception:
+        return []
+
+
+def _field_names_from_fields_json(cell: Any) -> Set[str]:
+    arr = _parse_json_array(cell)
+    names: Set[str] = set()
+    for obj in arr:
+        # Try common shapes
+        if isinstance(obj, dict):
+            name = obj.get("field_name") or obj.get("name") or obj.get("FIELD_NAME")
+            if name:
+                names.add(_norm_token(str(name)))
+    return names
+
+
+def _keys_from_primary_keys_json(cell: Any) -> Set[str]:
+    arr = _parse_json_array(cell)
+    keys: Set[str] = set()
+    for obj in arr:
+        if isinstance(obj, dict):
+            # sometimes stored as {"field_name": "...", ...}
+            name = obj.get("field_name") or obj.get("name")
+            if name:
+                keys.add(_norm_token(str(name)))
+        else:
+            # sometimes stored as simple strings
+            keys.add(_norm_token(str(obj)))
+    return keys
 
 
 def _jaccard(a: Set[str], b: Set[str]) -> float:
     if not a and not b:
         return 0.0
-    inter = len(a & b)
-    union = len(a | b)
-    return inter / union if union else 0.0
+    u = a | b
+    if not u:
+        return 0.0
+    i = a & b
+    return round(len(i) / len(u), 4)
 
 
-def _shared_sorted(a: Set[str], b: Set[str]) -> List[str]:
-    return sorted(a & b)
-
-
-def _parse_json_list(cell: Any) -> List[Any]:
+def _name_similarity(ex_text: str, cds_text: str) -> Tuple[float, List[str]]:
     """
-    Be forgiving: handle empty/NaN, JSON strings, or Python-ish list strings.
-    Returns [] if we can’t parse.
+    Token-set similarity for names/texts (0..1), plus the matched tokens.
     """
-    if cell is None:
-        return []
-    if isinstance(cell, float) and math.isnan(cell):
-        return []
-    if isinstance(cell, (list, tuple)):
-        return list(cell)
-    if not isinstance(cell, str):
-        return []
-
-    s = cell.strip()
-    if not s:
-        return []
-
-    # Try JSON first
-    try:
-        return json.loads(s)
-    except Exception:
-        pass
-
-    # Try Python literal (e.g., from CSV with single quotes)
-    try:
-        import ast
-        return ast.literal_eval(s)
-    except Exception:
-        return []
+    tokens_a = _tokenize(ex_text)
+    tokens_b = _tokenize(cds_text)
+    # use RapidFuzz for fuzzy token-set ratio (0..100)
+    score = fuzz.token_set_ratio(" ".join(tokens_a), " ".join(tokens_b)) / 100.0
+    shared = sorted(list(tokens_a & tokens_b))
+    return round(score, 4), shared
 
 
-def _extract_field_names(items: List[Any]) -> Set[str]:
+def compute_matches(
+    ecc_df: pd.DataFrame,
+    s4_df: pd.DataFrame,
+    top_k: int,
+    weights: Dict[str, float],
+) -> Dict[str, Any]:
     """
-    Items may be list[str] or list[dict] with 'field_name' (or 'name').
-    Return uppercase canonical names.
+    Produce the match payload for the UI.
+    Expects required columns to be present/validated by caller:
+      ECC: extractor_name, extractor_text, fields_json, primary_keys_json
+      S4:  cds_view_name, cds_view_text, fields_json, primary_keys_json
     """
-    out: Set[str] = set()
-    for it in items:
-        if isinstance(it, str):
-            out.add(it.upper())
-        elif isinstance(it, dict):
-            if "field_name" in it and isinstance(it["field_name"], str):
-                out.add(it["field_name"].upper())
-            elif "name" in it and isinstance(it["name"], str):
-                out.add(it["name"].upper())
-    return out
+    # Pre-extract CDS sets for speed
+    cds_rows: List[Dict[str, Any]] = []
+    for _, r in s4_df.iterrows():
+        cds_fields = _field_names_from_fields_json(r.get("fields_json"))
+        cds_keys = _keys_from_primary_keys_json(r.get("primary_keys_json"))
+        cds_rows.append(
+            {
+                "cds_view_name": str(r.get("cds_view_name") or ""),
+                "cds_view_text": str(r.get("cds_view_text") or ""),
+                "fields": cds_fields,
+                "keys": cds_keys,
+            }
+        )
 
+    results: List[Dict[str, Any]] = []
 
-def _extract_key_names(items: List[Any]) -> Set[str]:
-    """
-    Keys are list[str] or list[dict] with 'field_name'/'name'.
-    """
-    return _extract_field_names(items)
+    for _, ex in ecc_df.iterrows():
+        ex_fields = _field_names_from_fields_json(ex.get("fields_json"))
+        ex_keys = _keys_from_primary_keys_json(ex.get("primary_keys_json"))
 
+        ex_name = str(ex.get("extractor_name") or "")
+        ex_text = str(ex.get("extractor_text") or "")
+        ex_label = ex_text or ex_name
 
-# ---------- Loaders from DataFrames ----------
+        candidates: List[Dict[str, Any]] = []
+        for cds in cds_rows:
+            name_score, name_terms = _name_similarity(ex_label, cds["cds_view_text"] or cds["cds_view_name"])
+            field_overlap = _jaccard(ex_fields, cds["fields"])
+            key_overlap = _jaccard(ex_keys, cds["keys"])
 
-def df_to_records(
-    df: pd.DataFrame,
-    name_col: str,
-    text_col: str,
-    fields_col: str = "fields_json",
-    keys_col: str = "primary_keys_json",
-) -> List[Record]:
-    """
-    Convert a DataFrame with (name, text, fields_json, primary_keys_json) → List[Record].
-    - robust to NaN/empty cells
-    - tolerant of JSON or Python-literal style lists
-    """
-    # make sure missing columns don’t explode; use blanks
-    for col in (name_col, text_col, fields_col, keys_col):
-        if col not in df.columns:
-            df[col] = ""
+            score = (
+                weights["name"] * name_score
+                + weights["fields"] * field_overlap
+                + weights["keys"] * key_overlap
+            )
 
-    records: List[Record] = []
-    for _, row in df.iterrows():
-        name = str(row[name_col] or "").strip()
-        text = str(row[text_col] or "").strip()
+            candidates.append(
+                {
+                    "cds_view_name": cds["cds_view_name"],
+                    "cds_view_text": cds["cds_view_text"],
+                    "score": round(score, 4),
+                    "name_score": name_score,
+                    "field_overlap": field_overlap,
+                    "key_overlap": key_overlap,
+                    "matched_name_terms": name_terms,
+                    "shared_fields": sorted(list(ex_fields & cds["fields"])),
+                    "shared_keys": sorted(list(ex_keys & cds["keys"])),
+                }
+            )
 
-        fields_raw = _parse_json_list(row[fields_col])
-        keys_raw = _parse_json_list(row[keys_col])
+        # sort & keep top_k
+        candidates.sort(key=lambda c: c["score"], reverse=True)
+        results.append(
+            {
+                "extractor_name": ex_name,
+                "extractor_text": ex_text,
+                "candidates": candidates[: max(1, top_k)],
+            }
+        )
 
-        fields = _extract_field_names(fields_raw)
-        keys = _extract_key_names(keys_raw)
-
-        records.append(Record(name=name, text=text, fields=fields, keys=keys))
-    return records
-
-
-# ---------- Core matcher ----------
-
-def _score_pair(
-    a: Record,
-    b: Record,
-    w_name: float,
-    w_fields: float,
-    w_keys: float,
-) -> Tuple[float, Dict[str, Any]]:
-    name_sim = _name_similarity(a.name + " " + a.text, b.name + " " + b.text)
-    f_overlap = _jaccard(a.fields, b.fields)
-    k_overlap = _jaccard(a.keys, b.keys)
-
-    score = (w_name * name_sim) + (w_fields * f_overlap) + (w_keys * k_overlap)
-
-    explain = {
-        "name_score": round(name_sim, 4),
-        "field_overlap": round(f_overlap, 4),
-        "key_overlap": round(k_overlap, 4),
-        "matched_name_terms": sorted(set(_tokenize(a.name) + _tokenize(a.text))
-                                     & set(_tokenize(b.name) + _tokenize(b.text))),
-        "shared_fields": _shared_sorted(a.fields, b.fields),
-        "shared_keys": _shared_sorted(a.keys, b.keys),
+    payload = {
+        "matches": results,
     }
-    return score, explain
+    return payload
 
 
 def run_match(
-    extractors_df: pd.DataFrame,
-    cds_df: pd.DataFrame,
+    ecc_df: pd.DataFrame,
+    s4_df: pd.DataFrame,
     *,
     top_k: int = 3,
     weights: Dict[str, float] | None = None,
 ) -> Dict[str, Any]:
-    """
-    Main entrypoint used by FastAPI.
-    - extractors_df: DataFrame with columns:
-        extractor_name, extractor_text, fields_json, primary_keys_json
-    - cds_df: DataFrame with columns:
-        cds_view_name, cds_view_text, fields_json, primary_keys_json
-    """
-    if weights is None:
-        weights = {"name": 0.6, "fields": 0.3, "keys": 0.1}
+    weights = weights or {"name": 0.6, "fields": 0.3, "keys": 0.1}
+    # normalize
+    s = sum(weights.values()) or 1.0
+    weights = {k: float(v) / s for k, v in weights.items()}
 
-    # normalize weights defensively to sum 1.0
-    w_name = float(weights.get("name", 0.6))
-    w_fields = float(weights.get("fields", 0.3))
-    w_keys = float(weights.get("keys", 0.1))
-    total = w_name + w_fields + w_keys
-    if total <= 0:
-        w_name, w_fields, w_keys = 0.6, 0.3, 0.1
-        total = 1.0
-    w_name, w_fields, w_keys = (w_name / total, w_fields / total, w_keys / total)
-
-    # convert to normalized records
-    ext_list = df_to_records(
-        extractors_df,
-        name_col="extractor_name",
-        text_col="extractor_text",
-        fields_col="fields_json",
-        keys_col="primary_keys_json",
-    )
-    cds_list = df_to_records(
-        cds_df,
-        name_col="cds_view_name",
-        text_col="cds_view_text",
-        fields_col="fields_json",
-        keys_col="primary_keys_json",
-    )
-
-    # compute matches
-    matches: List[Dict[str, Any]] = []
-    for a in ext_list:
-        scored: List[Tuple[float, Dict[str, Any], Record]] = []
-        for b in cds_list:
-            s, expl = _score_pair(a, b, w_name, w_fields, w_keys)
-            scored.append((s, expl, b))
-        scored.sort(key=lambda x: x[0], reverse=True)
-
-        top = []
-        for s, expl, b in scored[: max(top_k, 1)]:
-            top.append(
-                {
-                    "cds_view_name": b.name,
-                    "cds_view_text": b.text,
-                    "score": round(s, 4),
-                    **expl,
-                }
-            )
-
-        matches.append(
-            {
-                "extractor_name": a.name,
-                "extractor_text": a.text,
-                "candidates": top,
-            }
-        )
-
-    return {
-        "run_info": {
-            "top_k": max(top_k, 1),
-            "weights": {"name": round(w_name, 4), "fields": round(w_fields, 4), "keys": round(w_keys, 4)},
-            "method": "heuristics-only (rapidfuzz + jaccard); no LLM",
-        },
-        "counts": {"extractors": len(ext_list), "cds_views": len(cds_list)},
-        "matches": matches,
+    payload = compute_matches(ecc_df, s4_df, top_k, weights)
+    payload["run_info"] = {
+        "top_k": top_k,
+        "weights": weights,
+        "method": "heuristics-only (rapidfuzz + jaccard); no LLM",
     }
+    payload["counts"] = {"extractors": int(len(ecc_df)), "cds_views": int(len(s4_df))}
+    return payload
