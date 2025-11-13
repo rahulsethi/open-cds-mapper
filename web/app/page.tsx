@@ -233,7 +233,7 @@ export default function HomePage() {
             Use server sample CSVs
           </label>
 
-          <label className="flex items-center gap-2 text-sm">
+        <label className="flex items-center gap-2 text-sm">
             Top K:
             <select
               value={topK}

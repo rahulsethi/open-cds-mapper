@@ -10,7 +10,6 @@ export async function postMatch(
   const params = new URLSearchParams();
   params.set("top_k", String(topK));
   if (weights) {
-    // Send raw numbers; API will normalize.
     params.set("w_name", String(weights.name));
     params.set("w_fields", String(weights.fields));
     params.set("w_keys", String(weights.keys));
